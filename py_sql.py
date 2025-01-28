@@ -277,7 +277,21 @@ def ora_date_to_pydate(var_date):
     return pydate
 
 def ora_date_inc(var_date,temporal,increment):
+    from datetime import date
     from dateutil.relativedelta import relativedelta
+    if 'TRUNC(SYSDATE' in var_date:
+        if '-' in var_date:
+            var_date_inc = var_date.split('-')[-1].strip()
+            var_date_inc = -int(var_date_inc)
+            var_date = date.today()
+            var_date += relativedelta(days=var_date_inc)
+            var_date = 'DATE ' + "'" + str(var_date) + "'"
+        elif '+' in var_date:
+            var_date_inc = var_date.split('+')[-1].strip()
+            var_date_inc = int(var_date_inc)
+            var_date = date.today()
+            var_date += relativedelta(days=var_date_inc)
+            var_date = 'DATE ' + "'" + str(var_date) + "'"
     var_date = ora_date_to_pydate(var_date)
     if temporal.upper() == 'DAYS' or temporal.upper() == 'DAY' or temporal.upper() == 'DAILY' or temporal.upper() == 'DD':
         var_date += relativedelta(days=increment)
@@ -503,7 +517,7 @@ def var_query_to_df(query_c_date,schema,date_start,date_end,time_out=60,temporal
         
         from func_timeout import func_timeout, FunctionTimedOut
         try:
-            dfs = func_timeout(time_out, query_to_df_whole_timeline, args=(query,schema,date_start,date_end))
+            dfs = func_timeout(time_out, query_to_df_whole_timeline, args=(query,schema,date_start,date_end,chunk_size))
         except FunctionTimedOut:
             if temporal.upper() == 'DAYS' or temporal.upper() == 'DAY' or temporal.upper() == 'DAILY' or temporal.upper() == 'DD':
                 if increment == 1:
@@ -952,6 +966,7 @@ select
             when data_type like '%CHAR%' then data_type ||'('||char_length||' CHAR)'
             else data_type
        end                                                                      data_type
+      ,char_length
 from tab_base
 '''
     df = pd.read_sql_query(query,engine)
@@ -993,11 +1008,8 @@ def apply_ora_hint(query):
 
 def fix_ora_string(string,substr="'",new_substr="''"):
     if substr in string:
-        if string[0] == substr and string[-1] == substr:
-            string_list = list(string[1:-1])
-        else:
-            string_list = list(string)
-        substr_idxs = [i.start() for i in re.finditer(substr, string) if i.start() > 0]
+        string_list = list(string)
+        substr_idxs = [i.start() for i in re.finditer(substr, string)]
         for idx in substr_idxs:
             string_list[idx] = new_substr
         string = ''.join(string_list)
@@ -1040,7 +1052,7 @@ def insert_row_to_sql(df,df_base,schema,table_name,source_owner,source_table):
     time_elapsed = time.time()
     my_credentials = get_credentials('my_credentials.txt',schema)
     engine = connect_sqlalchemy(my_credentials)
-    cursor = engine.connect()
+    conn = engine.connect()
     col_intersect = df.columns.intersection(df_base.columns)
     df = df_fix_dtype(df[col_intersect],schema)
     for cols in df.columns:
@@ -1055,7 +1067,7 @@ def insert_row_to_sql(df,df_base,schema,table_name,source_owner,source_table):
                 df[cols] = dt
     
     # Fix Oracle data types of new and current table before inserting rows.
-    fix_ora_col_length(df_base,df,engine,cursor,schema,table_name,source_owner,source_table)
+    fix_ora_col_length(df_base,df,engine,conn,schema,table_name,source_owner,source_table)
     for i in range(df.shape[0]):
         val = df.iloc[i]
         col = df.columns
@@ -1082,27 +1094,55 @@ def insert_row_to_sql(df,df_base,schema,table_name,source_owner,source_table):
         query = query.replace(')",','),')
         query = query.replace("')',","'),")
         try:
-            cursor.execute(text(query))
+            conn.execute(text(query))
         except Exception as err:
             print(f'Row {i} failed.')
-            cursor.rollback()
+            conn.rollback()
             print('Rollback.')
-            time_elapsed = get_time_elapsed(time_elapsed)
-            cursor.close()
+            conn.close()
             engine.dispose()
+            time_elapsed = get_time_elapsed(time_elapsed)
             raise
-    cursor.commit()
-    print('Commit.')
-    cursor.close()
+    conn.commit()
+    conn.close()
     engine.dispose()
+    print('Commit.')
     time_elapsed = get_time_elapsed(time_elapsed)
 
+    
+def bulk_insert_row_to_sql(df,df_base,schema,table_name):
+    import time
+    start_time = time.time()
+    time_elapsed = time.time()
+    my_credentials = get_credentials('my_credentials.txt',schema)
+    engine = connect_sqlalchemy(my_credentials)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    col_intersect = df.columns.intersection(df_base.columns)
+    dtyp = get_sqlalchemy_dtyp_dict(df[col_intersect],engine)
+    df = df_fix_dtype(df[col_intersect],schema,dtyp)
+    df = excel_df_fix_strftime(df)
+    try:
+        # Convert dataframe to sql
+        event.listens_for(engine, 'before_cursor_execute')
+        sql = df.to_sql(name=table_name, con=engine, schema=schema, if_exists='append', dtype=dtyp, index=False)
+    except Exception as err:
+        session.rollback()
+        engine.dispose()
+        print('Rollback.')
+        raise
+    else:
+        session.commit()
+        print('Commit.')
+    end_time = time.time()
+    print('Execution time: {:2f}'.format(end_time - start_time),'s')
+    
 def merge_to_sql(df,table_name,schema,query,connection_key):
     import time
     time_elapsed = time.time()
     my_credentials = get_credentials('my_credentials.txt',schema)
     engine = connect_sqlalchemy(my_credentials)
-    cursor = engine.connect()
+    conn = engine.connect()
     merge_statement = query_merge(df,table_name,schema,query,connection_key)
     try:
         query = f'''BEGIN
@@ -1113,38 +1153,44 @@ EXCEPTION
         ROLLBACK;
         RAISE;
 END;'''
-        cursor.execute(text(query))
+        conn.execute(text(query))
     except Exception as err:
-        cursor.rollback()
+        conn.rollback()
+        conn.close()
+        engine.dispose()
         print('Merge failed. Rollback.')
         time_elapsed = get_time_elapsed(time_elapsed)
-        cursor.close()
-        engine.dispose()
         raise
     else:
-        cursor.commit()
-        cursor.close()
+        conn.commit()
+        conn.close()
         engine.dispose()
         print('Merged successfully. Commit.')
         time_elapsed = get_time_elapsed(time_elapsed)
 
-def var_merge_to_sql(table_name,schema,query_c_date,date_start,date_end,
-                     connection_key,time_out=60,temporal='days',increment=1):
+def var_merge_to_sql(schema,source_table,source_owner,
+                     query_c_date,date_start,date_end,connection_key,
+                     time_out=60,temporal='days',increment=1):
     import time
+    from datetime import date
     # Open
     my_credentials = get_credentials('my_credentials.txt',schema)
+    engine = connect_sqlalchemy(my_credentials)
+    conn = engine.raw_connection()
+    cursor = conn.cursor()
+    date_today = date.today()
+    if ora_date_to_pydate(date_end) > date_today:
+        date_end = 'DATE ' + "'" + str(date_today) + "'"
     c_date_start = date_start
     c_date_end = date_end
     date_diff = days_between(c_date_start,c_date_end,temporal)
-    engine = connect_sqlalchemy(my_credentials)
-    cursor = engine.connect()
     query_sample_c_date = f'''
-select * from {schema}.{table_name}
+select * from {source_owner}.{source_table}
 where 1=1
       and date_application = {ora_date_inc(c_date_start,'days',-5)}
       and rownum = 1
 '''
-    df = pd.read_sql_query(query_sample_c_date,engine)
+    df = query_to_df(query_sample_c_date,schema,None)
     df.columns = df.columns.str.upper()
     
     try:
@@ -1152,10 +1198,11 @@ where 1=1
         time_elapsed = time.time()
         # Set initial value for merge boolean
         is_merge_done = False
-        def func_merge(df,table_name,schema,query_c_date,date_start,date_end,connection_key):
+        def func_merge(df,source_table,source_owner,cursor,
+                       query_c_date,date_start,date_end,connection_key):
             time_elapsed = time.time()
             query = var_query_fstring(query_c_date,date_start,date_end)
-            merge_statement = query_merge(df,table_name,schema,query,connection_key)
+            merge_statement = query_merge(df,source_table,source_owner,query,connection_key)
             try:
                 query = f'''BEGIN
         {merge_statement}
@@ -1165,22 +1212,32 @@ EXCEPTION
         ROLLBACK;
         RAISE;
 END;'''
-                cursor.execute(text(query))
-            except Exception as err:
-                cursor.rollback()
+                cursor.execute(query)
+            except sqlalchemy.exc.DatabaseError as db_err:
+                conn.rollback()
                 print('Merge failed. Rollback.')
-                time_elapsed = get_time_elapsed(time_elapsed)
                 cursor.close()
+                conn.close()
+                engine.dispose()
+                print('Closed connection.')
+                time_elapsed = get_time_elapsed(time_elapsed)
+            except KeyboardInterrupt:
+                cursor.close()
+                conn.close()
                 engine.dispose()
                 raise
+            except Exception as err:
+                print('Error: ' + str(err))
+                time_elapsed = get_time_elapsed(time_elapsed)
             else:
-                cursor.commit()
+                conn.commit()
                 print('Merged successfully. Commit.')
                 time_elapsed = get_time_elapsed(time_elapsed)
-                return True
+        
         from func_timeout import func_timeout, FunctionTimedOut
         try:
-            is_merge_done = func_timeout(time_out, func_merge, args=(df,table_name,schema,query_c_date,date_start,date_end,connection_key))
+            func_timeout(time_out, func_merge, args=(df,source_table,source_owner,cursor,
+                                                                     query_c_date,date_start,date_end,connection_key))
         except FunctionTimedOut:
             if temporal.upper() == 'DAYS' or temporal.upper() == 'DAY' or temporal.upper() == 'DAILY' or temporal.upper() == 'DD':
                 if increment == 1:
@@ -1205,27 +1262,38 @@ END;'''
             time_elapsed = get_time_elapsed(time_elapsed)
         except Exception as err:
             print('Error: ' + str(err))
-            cursor.close()
-            engine.dispose()
             time_elapsed = get_time_elapsed(time_elapsed)
+        else:
+            is_merge_done = True
         
         chunk_merge_start_time = time.time()
         if is_merge_done == False:
             c_date_end = ora_date_inc(c_date_start,temporal,increment)
             for i in range(date_diff):
                 print('Timeline: {} to {}'.format(c_date_start,c_date_end))
-                func_merge(df,table_name,schema,query_c_date,c_date_start,c_date_end,connection_key)
-                c_date_start = ora_date_inc(c_date_start,temporal,increment)
-                c_date_end = ora_date_inc(c_date_end,temporal,increment)
-                if ora_date_to_pydate(c_date_end) > ora_date_to_pydate(date_end):
-                    c_date_end = date_end
-                    if c_date_end == c_date_start:
-                        c_date_end = ora_date_inc(c_date_end,'days',1)
+                try:
+                    func_merge(df,source_table,source_owner,cursor,
+                               query_c_date,c_date_start,c_date_end,connection_key)
+                except Exception as err:
+                    break
+                    raise
+                else:
+                    c_date_start = ora_date_inc(c_date_start,temporal,increment)
+                    c_date_end = ora_date_inc(c_date_end,temporal,increment)
+                    if ora_date_to_pydate(c_date_end) > ora_date_to_pydate(date_end):
+                        c_date_end = date_end
+                        if c_date_end == c_date_start:
+                            c_date_end = ora_date_inc(c_date_end,'days',1)
         chunk_merge_end_time = time.time()
         print('Chunks merge done. Time elapsed: {:2f}'.format(chunk_merge_end_time - chunk_merge_start_time),'s')
-    except Exception as err:
-        print('Error: ' + str(err))
         cursor.close()
+        conn.close()
+        engine.dispose()
+    except KeyboardInterrupt:
+        print('Keyboard Interrupted.')
+    except Exception as err:
+        conn.rollback()
+        conn.close()
         engine.dispose()
         
 def split_dataframe(df, chunk_size): 
@@ -1881,16 +1949,17 @@ def is_nan(val):
 def excel_df_fix_strftime(df):
     from datetime import date
     df_sample = df.loc[:10000,:]
-    df = df_sample[df_sample.notnull()]
+    df_sample = df_sample[df_sample.notnull()]
+    df = df[df.notnull()]
     for cols in df.columns:
-        if ((check_dtime(df[cols])['is_date'] == True or check_dtime(df[cols])['is_timestamp'] == True) and
-            (df[df[cols].notnull()][cols].apply(lambda x: isinstance(x,int)).all() == False)
+        if ((check_dtime(df_sample[cols])['is_date'] == True or check_dtime(df_sample[cols])['is_timestamp'] == True) and
+            (df_sample[df_sample[cols].notnull()][cols].apply(lambda x: isinstance(x,int)).all() == False)
            ):
-            if check_dtime(df[cols])['is_date'] == True and check_dtime(df[cols])['is_timestamp'] == False:
+            if check_dtime(df_sample[cols])['is_date'] == True and check_dtime(df_sample[cols])['is_timestamp'] == False:
                 dt = pd.to_datetime(df[cols],format="%Y-%m-%d %H:%M:%S",errors='coerce')
                 dt = dt.apply(lambda x: x.date())
                 df[cols] = dt
-            elif check_dtime(df[cols])['is_date'] == True and check_dtime(df[cols])['is_timestamp'] == True:
+            elif check_dtime(df_sample[cols])['is_date'] == True and check_dtime(df_sample[cols])['is_timestamp'] == True:
                 dt = pd.to_datetime(df[cols],format="%Y-%m-%d %H:%M:%S",errors='coerce')
                 df[cols] = dt
     return df
