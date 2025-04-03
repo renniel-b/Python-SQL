@@ -6,9 +6,15 @@
 
 from IPython.display import display, Markdown
 import time
+import pytz
+import gc
 import os
+import sys
 import pathlib
 import re
+import json
+import traceback
+from hashlib import sha512
 
 import sqlalchemy
 from sqlalchemy.engine import *
@@ -20,11 +26,29 @@ from sqlalchemy import Column
 from sqlalchemy import MetaData
 from sqlalchemy.orm import sessionmaker
 
+from pyspark.sql import SparkSession
+from pyspark.sql import SQLContext
+from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
+from pyspark.sql.types import *
+from pyspark.sql import Row
+from pyspark.sql import HiveContext
+from pyspark.sql.functions import udf
+from pyspark import SparkContext
+from pyspark import SparkConf
+from pyspark.sql.functions import *
+
+import math
+import random
 import numpy as np
 import pandas as pd
 
 from pyexcelerate import Workbook
 from openpyxl import load_workbook
+
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import seaborn as sns
 
 
 current_directory = 'C:\\Users\\'+os.environ.get('USERNAME')
@@ -240,28 +264,102 @@ def days_between(d1,d2,temporal='days'):
     import datetime
     from dateutil.relativedelta import relativedelta
     from datetime import date
-    if "DATE '" in d1 and '-' in d1:
-        d1_result = re.search(" '"+"(.*)"+"'",d1)
-        d1_year = d1_result.group(1)[0:4]
-        d1_month = d1_result.group(1)[5:7]
-        d1_day = d1_result.group(1)[8:10]
-        d1 = date(int(d1_year), int(d1_month), int(d1_day))
-
-        d2_result = re.search(" '"+"(.*)"+"'",d2)
-        d2_year = d2_result.group(1)[0:4]
-        d2_month = d2_result.group(1)[5:7]
-        d2_day = d2_result.group(1)[8:10]
-        d2 = date(int(d2_year), int(d2_month), int(d2_day))
+    d1_split = d1.split("'")
+    if d1_split[-1] == '':
+        d1_split.pop(-1)
+    d2_split = d2.split("'")
+    if d2_split[-1] == '':
+        d2_split.pop(-1)
+    if "DATE '" in d1 and '-' in d1 and len(d1_split) > 2:
+        d1 = "'".join(d1_split[:2])+"'"
+        d1_inc = d1_split[-1].strip().split(' ')
+        inc = []
+        for i in d1_inc:
+            if len(d1_inc) == 1:
+                d1_inc = int(i)
+            else:
+                if i == "-":
+                    inc.append(i)
+                elif i == "+":
+                    pass
+                elif i == "":
+                    pass
+                elif type(int(i)) == int:
+                    inc.append(i)
+        d1_inc = int(''.join(inc))
+        d1 = ora_date_to_pydate(d1)
+        d1 += relativedelta(days=d1_inc)
+    elif "DATE '" in d1 and '-' in d1:
+        d1 = ora_date_to_pydate(d1)
+    elif 'TRUNC(SYSDATE' in d1:
+        if '-' in d1:
+            d1_inc = d1.split('-')[-1].strip()
+            d1_inc = -int(d1_inc)
+            d1 = date.today()
+            d1 += relativedelta(days=d1_inc)
+            d1 = 'DATE ' + "'" + str(d1) + "'"
+        elif '+' in d1:
+            d1_inc = d1.split('+')[-1].strip()
+            d1_inc = int(d1_inc)
+            d1 = date.today()
+            d1 += relativedelta(days=d1_inc)
+            d1 = 'DATE ' + "'" + str(d1) + "'"
+        else:
+            d1 = date.today()
+            d1 = 'DATE ' + "'" + str(d1) + "'"
+        d1 = ora_date_to_pydate(d1)
     else:
-        d1 = datetime.strptime(d1, "%Y-%m-%d")
-        d2 = datetime.strptime(d2, "%Y-%m-%d")
+        d1 = datetime.datetime.strptime(d1, "%Y-%m-%d")
+            
+    if "DATE '" in d2 and '-' in d2 and len(d2_split) > 2:
+        d2 = "'".join(d2_split[:2])+"'"
+        d2_inc = d2_split[-1].strip().split(' ')
+        print(d2_split)
+        print(d2_inc)
+        inc = []
+        for i in d2_inc:
+            if len(d2_inc) == 1:
+                d2_inc = int(i)
+            else:
+                if i == "-":
+                    inc.append(i)
+                elif i == "+":
+                    pass
+                elif i == "":
+                    pass
+                elif type(int(i)) == int:
+                    inc.append(i)
+        d2_inc = int(''.join(inc))
+        d2 = ora_date_to_pydate(d2)
+        d2 += relativedelta(days=d2_inc)
+    elif "DATE '" in d2 and '-' in d2:
+        d2 = ora_date_to_pydate(d2)
+    elif 'TRUNC(SYSDATE' in d2:
+        if '-' in d2:
+            d2_inc = d2.split('-')[-1].strip()
+            d2_inc = -int(d2_inc)
+            d2 = date.today()
+            d2 += relativedelta(days=d2_inc)
+            d2 = 'DATE ' + "'" + str(d2) + "'"
+        elif '+' in d2:
+            d2_inc = d2.split('+')[-1].strip()
+            d2_inc = int(d2_inc)
+            d2 = date.today()
+            d2 += relativedelta(days=d2_inc)
+            d2 = 'DATE ' + "'" + str(d2) + "'"
+        else:
+            d2 = date.today()
+            d2 = 'DATE ' + "'" + str(d2) + "'"
+        d2 = ora_date_to_pydate(d2)
+    else:
+        d2 = datetime.datetime.strptime(d2, "%Y-%m-%d")
         
     if temporal.upper() == 'DAYS' or temporal.upper() == 'DAY' or temporal.upper() == 'DAILY' or temporal.upper() == 'DD':
-        diff = abs(relativedelta(d2, d1).days)
+        diff = abs((d2-d1).days)
     elif temporal.upper() == 'WEEKS' or temporal.upper() == 'WEEK' or temporal.upper() == 'WEEKLY' or temporal.upper() == 'WW' or temporal.upper() == 'IW':
-        diff = abs(relativedelta(d2, d1).days // 7) + 1
+        diff = abs((d2-d1).days // 7) + 1
     elif temporal.upper() == 'MONTHS' or temporal.upper() == 'MONTH' or temporal.upper() == 'MONTHLY' or temporal.upper() == 'MM':
-        diff = abs(relativedelta(d2, d1).months) + 1
+        diff = abs(relativedelta(d2, d1).years)*12 + abs(relativedelta(d2, d1).months) + 1
     elif temporal.upper() == 'YEARS' or temporal.upper() == 'YEAR' or temporal.upper() == 'YEARLY' or temporal.upper() == 'YY'  or temporal.upper() == 'YYYY':
         diff = abs(relativedelta(d2, d1).years) + 1
         
@@ -269,6 +367,23 @@ def days_between(d1,d2,temporal='days'):
 
 def ora_date_to_pydate(var_date):
     from datetime import date
+    from dateutil.relativedelta import relativedelta
+    if 'TRUNC(SYSDATE' in var_date:
+        if '-' in var_date:
+            var_date_inc = var_date.split('-')[-1].strip()
+            var_date_inc = -int(var_date_inc)
+            var_date = date.today()
+            var_date += relativedelta(days=var_date_inc)
+            var_date = 'DATE ' + "'" + str(var_date) + "'"
+        elif '+' in var_date:
+            var_date_inc = var_date.split('+')[-1].strip()
+            var_date_inc = int(var_date_inc)
+            var_date = date.today()
+            var_date += relativedelta(days=var_date_inc)
+            var_date = 'DATE ' + "'" + str(var_date) + "'"
+        else:
+            var_date = date.today()
+            var_date = 'DATE ' + "'" + str(var_date) + "'"
     var_date_result = re.search(" '"+"(.*)"+"'",var_date)
     var_date_year = var_date_result.group(1)[0:4]
     var_date_month = var_date_result.group(1)[5:7]
@@ -291,6 +406,9 @@ def ora_date_inc(var_date,temporal,increment):
             var_date_inc = int(var_date_inc)
             var_date = date.today()
             var_date += relativedelta(days=var_date_inc)
+            var_date = 'DATE ' + "'" + str(var_date) + "'"
+        else:
+            var_date = date.today()
             var_date = 'DATE ' + "'" + str(var_date) + "'"
     var_date = ora_date_to_pydate(var_date)
     if temporal.upper() == 'DAYS' or temporal.upper() == 'DAY' or temporal.upper() == 'DAILY' or temporal.upper() == 'DD':
@@ -607,7 +725,10 @@ def var_query_to_df(query_c_date,schema,date_start,date_end,time_out=60,temporal
         engine.dispose()
     return dfs
 
-def query_create_table(df,table_name,schema,engine,source_owner='TEST_OWNER',source_table='TEST_TABLE'):
+def query_create_table(query,schema,table_name,source_owner='TEST_OWNER',source_table='TEST_TABLE'):
+    my_credentials = get_credentials('my_credentials.txt',schema)
+    engine = connect_sqlalchemy(my_credentials)
+    df = query_to_df(query,schema)
     df_col = df.columns
     df_col_typ = df.dtypes
     df_col_list = [df_col[i] for i in range(df.shape[1])]
@@ -616,7 +737,11 @@ def query_create_table(df,table_name,schema,engine,source_owner='TEST_OWNER',sou
     df_col_str = df_col_str.replace("]","")
     df_col_str = df_col_str.replace(", ",", \n")
     col_dtyp_list = []
-    df_col_oracle_typ = get_oracle_data_type(df_col_str,engine,source_owner=source_owner,source_table=source_table)
+    try:
+        df_col_oracle_typ = get_oracle_data_type(df_col_str,engine,source_owner=source_owner,source_table=source_table)
+        engine.dispose()
+    except:
+        engine.dispose()
     for i in range(len(df_col)):
         if 'date' in str(df_col_typ[i]).lower() or 'dtime' in str(df_col[i]).lower():
             col_dtyp_list.append(df_col[i] + ' ' + 'DATE')
@@ -658,7 +783,10 @@ PARTITION P0 VALUES LESS THAN (TO_DATE(' 2015-01-01 00:00:00', 'SYYYY-MM-DD HH24
         query
     return f'''{query};'''
 
-def query_create_gtt(df,table_name,schema,engine,source_owner='TEST_OWNER',source_table='TEST_TABLE'):
+def query_create_gtt(query,schema,table_name,source_owner='TEST_OWNER',source_table='TEST_TABLE'):
+    my_credentials = get_credentials('my_credentials.txt',schema)
+    engine = connect_sqlalchemy(my_credentials)
+    df = query_to_df(query,schema)
     df_col = df.columns
     df_col_typ = df.dtypes
     df_col_list = [df_col[i] for i in range(df.shape[1])]
@@ -667,7 +795,11 @@ def query_create_gtt(df,table_name,schema,engine,source_owner='TEST_OWNER',sourc
     df_col_str = df_col_str.replace("]","")
     df_col_str = df_col_str.replace(", ",", \n")
     col_dtyp_list = []
-    df_col_oracle_typ = get_oracle_data_type(df_col_str,engine,source_owner=source_owner,source_table=source_table)
+    try:
+        df_col_oracle_typ = get_oracle_data_type(df_col_str,engine,source_owner=source_owner,source_table=source_table)
+        engine.dispose()
+    except:
+        engine.dispose()
     for i in range(len(df_col)):
         if 'date' in str(df_col_typ[i]).lower() or 'dtime' in str(df_col[i]).lower():
             col_dtyp_list.append(df_col[i] + ' ' + 'DATE')
@@ -705,7 +837,7 @@ def insert_space_at_line_breaks_mrg(text,num_indent):
         text = text
     return text
 
-def query_merge(df,table_name,schema,query,connection_key):
+def query_merge(df,query,schema,table_name,connection_key):
     def ora_conn_key(connection_key):
         if type(connection_key) == list and len(connection_key) > 1:
             new_connection_key = None
@@ -772,9 +904,10 @@ VALUES
 '''
     return query
 
-def query_create_package(df,table_name,schema,query,connection_key):
+def query_create_package(query,query_sample,schema,table_name,connection_key):
     from datetime import date
-    merge_statement = query_merge(df,table_name,schema,query,connection_key)
+    df = query_to_df(query_sample,schema)
+    merge_statement = query_merge(df,query,schema,table_name,connection_key)
     
     
     query_head = f'''
@@ -874,7 +1007,8 @@ END PCKG_{table_name.upper()};
 '''
     return query_head,query_body
 
-def query_merge_when_matched_and_or_not_matched(df,table_name,schema):
+def query_merge_when_matched_and_or_not_matched(query,schema,table_name):
+    df = query_to_df(query,schema)
     df_col = df.columns
     
     # WHEN MATCHED THEN UPDATE SET
@@ -916,7 +1050,8 @@ COMMIT;
 '''
     return query
 
-def query_insert_when_not_matched(df,table_name,schema):
+def query_insert_when_not_matched(query,schema,table_name):
+    df = query_to_df(query,schema)
     df_col = df.columns
     df_col_list_ins = ['DM1.'+df_col[i] for i in range(df.shape[1])]
     df_col_ins = str(df_col_list_ins).replace("'","")
@@ -1137,13 +1272,14 @@ def bulk_insert_row_to_sql(df,df_base,schema,table_name):
     end_time = time.time()
     print('Execution time: {:2f}'.format(end_time - start_time),'s')
     
-def merge_to_sql(df,table_name,schema,query,connection_key):
+def merge_to_sql(query,query_sample,schema,table_name,connection_key):
     import time
     time_elapsed = time.time()
     my_credentials = get_credentials('my_credentials.txt',schema)
     engine = connect_sqlalchemy(my_credentials)
     conn = engine.connect()
-    merge_statement = query_merge(df,table_name,schema,query,connection_key)
+    df = query_to_df(query_sample,schema)
+    merge_statement = query_merge(df,query,schema,table_name,connection_key)
     try:
         query = f'''BEGIN
         {merge_statement}
@@ -1169,29 +1305,74 @@ END;'''
         time_elapsed = get_time_elapsed(time_elapsed)
 
 def var_merge_to_sql(schema,source_table,source_owner,
-                     query_c_date,date_start,date_end,connection_key,
-                     time_out=60,temporal='days',increment=1):
+                     query_c_date,query_sample,date_start,date_end,
+                     connection_key,time_out=60,temporal='days',increment=1,direction=1):
     import time
     from datetime import date
+    from dateutil.relativedelta import relativedelta
     # Open
     my_credentials = get_credentials('my_credentials.txt',schema)
     engine = connect_sqlalchemy(my_credentials)
     conn = engine.raw_connection()
     cursor = conn.cursor()
+    df = query_to_df(query_sample,schema)
+    
+    d1 = date_start
+    d1_split = d1.split("'")
+    if d1_split[-1] == '':
+        d1_split.pop(-1)
+    d2 = date_end
+    d2_split = d2.split("'")
+    if d2_split[-1] == '':
+        d2_split.pop(-1)
+    if "DATE '" in d1 and '-' in d1 and len(d1_split) > 2:
+        d1 = "'".join(d1_split[:2])+"'"
+        d1_inc = d1_split[-1].strip().split(' ')
+        inc = []
+        for i in d1_inc:
+            if len(d1_inc) == 1:
+                d1_inc = int(i)
+            else:
+                if i == "-":
+                    inc.append(i)
+                elif i == "+":
+                    pass
+                elif i == "":
+                    pass
+                elif type(int(i)) == int:
+                    inc.append(i)
+        d1_inc = int(''.join(inc))
+        d1 = ora_date_to_pydate(d1)
+        d1 += relativedelta(days=d1_inc)
+        date_start = 'DATE ' + "'" + str(d1) + "'"
+        
+    if "DATE '" in d2 and '-' in d2 and len(d2_split) > 2:
+        d2 = "'".join(d2_split[:2])+"'"
+        d2_inc = d2_split[-1].strip().split(' ')
+        inc = []
+        for i in d2_inc:
+            if len(d2_inc) == 1:
+                d2_inc = int(i)
+            else:
+                if i == "-":
+                    inc.append(i)
+                elif i == "+":
+                    pass
+                elif i == "":
+                    pass
+                elif type(int(i)) == int:
+                    inc.append(i)
+        d2_inc = int(''.join(inc))
+        d2 = ora_date_to_pydate(d2)
+        d2 += relativedelta(days=d2_inc)
+        date_end = 'DATE ' + "'" + str(d2) + "'"
+        
     date_today = date.today()
     if ora_date_to_pydate(date_end) > date_today:
         date_end = 'DATE ' + "'" + str(date_today) + "'"
     c_date_start = date_start
     c_date_end = date_end
     date_diff = days_between(c_date_start,c_date_end,temporal)
-    query_sample_c_date = f'''
-select * from {source_owner}.{source_table}
-where 1=1
-      and date_application = {ora_date_inc(c_date_start,'days',-5)}
-      and rownum = 1
-'''
-    df = query_to_df(query_sample_c_date,schema,None)
-    df.columns = df.columns.str.upper()
     
     try:
         print('Timeline: {} to {}'.format(c_date_start,c_date_end))
@@ -1202,7 +1383,7 @@ where 1=1
                        query_c_date,date_start,date_end,connection_key):
             time_elapsed = time.time()
             query = var_query_fstring(query_c_date,date_start,date_end)
-            merge_statement = query_merge(df,source_table,source_owner,query,connection_key)
+            merge_statement = query_merge(df,query,source_owner,source_table,connection_key)
             try:
                 query = f'''BEGIN
         {merge_statement}
@@ -1237,7 +1418,7 @@ END;'''
         from func_timeout import func_timeout, FunctionTimedOut
         try:
             func_timeout(time_out, func_merge, args=(df,source_table,source_owner,cursor,
-                                                                     query_c_date,date_start,date_end,connection_key))
+                                                     query_c_date,date_start,date_end,connection_key))
         except FunctionTimedOut:
             if temporal.upper() == 'DAYS' or temporal.upper() == 'DAY' or temporal.upper() == 'DAILY' or temporal.upper() == 'DD':
                 if increment == 1:
@@ -1268,22 +1449,63 @@ END;'''
         
         chunk_merge_start_time = time.time()
         if is_merge_done == False:
-            c_date_end = ora_date_inc(c_date_start,temporal,increment)
+            if direction == -1:
+                c_date_start = ora_date_inc(c_date_end,temporal,direction*increment)
+            else:
+                c_date_end = ora_date_inc(c_date_start,temporal,increment)
+            is_sample_done = False
             for i in range(date_diff):
-                print('Timeline: {} to {}'.format(c_date_start,c_date_end))
                 try:
+                    if is_sample_done == False:
+                        if direction == -1:
+                            c_date_start = ora_date_inc(c_date_end,'day',direction*1)
+                        else:
+                            c_date_end = ora_date_inc(c_date_start,'day',1)
+                        print('Timeline: {} to {}'.format(c_date_start,c_date_end))
+                        func_merge(df,source_table,source_owner,cursor,
+                                   query_c_date,c_date_start,c_date_end,connection_key)
+                        if direction == -1:
+                            if c_date_start != date_start:
+                                c_date_end = c_date_start
+                        else:
+                            if c_date_end != date_end:
+                                c_date_start = c_date_end
+                        is_sample_done = True
+                    
+                    if direction == -1:
+                        c_date_start = ora_date_inc(c_date_end,temporal,direction*increment)
+                    else:
+                        c_date_end = ora_date_inc(c_date_start,temporal,increment)
+                    if ora_date_to_pydate(c_date_end) > ora_date_to_pydate(date_end):
+                        if direction == -1:
+                            c_date_start = date_start
+                            if c_date_start == c_date_end:
+                                c_date_start = ora_date_inc(c_date_start,'days',direction*1)
+                        else:
+                            c_date_end = date_end
+                            if c_date_end == c_date_start:
+                                c_date_end = ora_date_inc(c_date_end,'days',1)
+                    print('Timeline: {} to {}'.format(c_date_start,c_date_end))
                     func_merge(df,source_table,source_owner,cursor,
                                query_c_date,c_date_start,c_date_end,connection_key)
                 except Exception as err:
                     break
                     raise
                 else:
-                    c_date_start = ora_date_inc(c_date_start,temporal,increment)
-                    c_date_end = ora_date_inc(c_date_end,temporal,increment)
-                    if ora_date_to_pydate(c_date_end) > ora_date_to_pydate(date_end):
-                        c_date_end = date_end
-                        if c_date_end == c_date_start:
-                            c_date_end = ora_date_inc(c_date_end,'days',1)
+                    if direction == -1:
+                        c_date_end = c_date_start
+                        c_date_start = ora_date_inc(c_date_start,temporal,direction*increment)
+                        if ora_date_to_pydate(c_date_start) < ora_date_to_pydate(date_start):
+                            c_date_start = date_start
+                            if c_date_start == c_date_end:
+                                c_date_start = ora_date_inc(c_date_start,'days',direction*1)
+                    else:
+                        c_date_start = c_date_end
+                        c_date_end = ora_date_inc(c_date_end,temporal,increment)
+                        if ora_date_to_pydate(c_date_end) > ora_date_to_pydate(date_end):
+                            c_date_end = date_end
+                            if c_date_end == c_date_start:
+                                c_date_end = ora_date_inc(c_date_end,'days',1)
         chunk_merge_end_time = time.time()
         print('Chunks merge done. Time elapsed: {:2f}'.format(chunk_merge_end_time - chunk_merge_start_time),'s')
         cursor.close()
@@ -2901,3 +3123,1436 @@ def create_table_sql(query,fname,schema,table_name,sheet_name):
     end_time = time.time()
     print('Execution time: {:2f}'.format(end_time - start_time),'s')
 
+
+
+#--------------------------------- Data Visualization
+
+
+def appshare_table_and_plot(data, gb_key, col_time, list_apps, display_table = True, display_plot = True):
+    
+    share_df = data.copy()
+    
+    aggs = {gb_key : ['count']}
+    for app in list_apps:
+        aggs[app] = ['sum', 'mean']
+    
+    share_df = share_df.groupby(col_time).agg(aggs)
+    agg_col_names = ['{}_{}'.format(x[1], x[0]) for x in share_df.columns.tolist()]
+    agg_col_names[0] = 'count samples'
+    
+    list_new_columns = []
+    for col in agg_col_names:
+        if col.startswith('sum'):
+            new_col = 'count has ' + col.split('sum_')[1]
+        elif col.startswith('mean'):
+            new_col = 'percentage has ' + col.split('mean_')[1]
+        else:
+            new_col = col
+        
+        list_new_columns.append(new_col)
+    
+    share_df.columns = pd.Index(list_new_columns)
+    
+    for col in list(share_df.columns):
+        if col.startswith('percentage has '):
+            share_df[col] = round(share_df[col] * 100, 2)
+    
+    if display_table:
+        display(share_df)
+        print('')
+    
+    if display_plot:
+        
+        list_col_to_plot = ['percentage has ' + col for col in list_apps]
+        plot_df = share_df[list_col_to_plot].copy()
+        
+        plot_df.plot(figsize = (15, 8), linewidth = 2, marker = 'o', markersize = 8, cmap = 'Paired')
+        
+        plt.title('Percentage of certain apps per ' + col_time, fontsize = 16)
+        plt.xlabel(col_time, fontsize = 14)
+        plt.ylabel('Percentage', fontsize = 14)
+        plt.legend(loc = 'best')
+        plt.show()
+        print('')
+        
+        
+def multiple_barplot(list_df, list_title, list_x_axis, list_y_axis, num_cols, diff_colors = False, c_palette = None):
+    
+    num_df = len(list_df)
+    num_rows = int(np.ceil(num_df / num_cols))
+    
+    horizontal = 14 * num_cols
+    vertical = 8 * num_rows
+    
+    plt.figure(figsize = (horizontal, vertical))
+    
+    gs = gridspec.GridSpec(num_rows, num_cols)
+    gs.update(wspace = 0.2, hspace = 0.5)
+    
+    list_ax = []
+    row = 0
+    col = 0
+    
+    for i in range(0, num_df):
+        if col < num_cols - 1:
+            ax = plt.subplot(gs[row, col])
+            list_ax.append(ax)
+            col = col + 1
+        elif col == num_cols -1:
+            ax = plt.subplot(gs[row, col])
+            list_ax.append(ax)
+            col = 0
+            row = row + 1
+            
+    list_color = ['#7e1e9c', '#15b01a', '#0343df', '#ff81c0', '#653700', '#e50000', '#029386'
+             , '#f97306', '#929591', '#033500' , '#06c2ac' , '#dbb40c', '#c04e01', '#000000'
+             , '#0652ff', '#1fa774', '#7FFF00', '#292421']
+
+    c_mult = int(np.ceil(num_df / len(list_color)))
+    final_list_color = list_color * c_mult
+    final_list_color = final_list_color[:num_df]
+    
+    for df, ax, title, x_axis, y_axis, color in zip(list_df, list_ax, list_title, list_x_axis, list_y_axis, final_list_color):
+        if diff_colors:
+            sns.barplot(df[x_axis], df[y_axis], color = color, ax = ax)
+        elif c_palette is not None:
+            sns.barplot(df[x_axis], df[y_axis], palette = c_palette, ax = ax)
+        else:
+            sns.barplot(df[x_axis], df[y_axis], color = 'darkblue', ax = ax)
+        
+        ax.set_title(title, fontsize = 20)
+        ax.set_xlabel(x_axis, fontsize = 15)
+        ax.set_ylabel(y_axis, fontsize = 15)
+        ax.tick_params(axis = 'both', labelsize = 13)
+        ax.tick_params(axis = 'x', rotation = 90)
+
+
+
+#--------------------------------- Hadoop/PySpark scripts below
+
+#-------- spark = SparkSession.builder.config('spark.sql.session.timeZone', 'Asia/Manila').getOrCreate()
+
+
+def get_engine(filename=None):
+    """
+    Creates SQLAlchemy engine (as singleton) based on connection string from ~/.ora_cnn or filename if specified.
+
+    :param filename: name of file with connection string
+    :return: SQLAlchemy engine
+    """
+    global _engine
+    if filename is None:
+        filename=os.path.join(os.path.expanduser('~'), '.ora_cnn')
+    need_reconnect = False
+    if '_engine' in globals() and _engine is not None:
+        try: 
+            pd.read_sql_query('select * from dual', con=_engine)
+        except sqlalchemy.exc.DatabaseError as e:           
+            warnings.warn(traceback.format_exc())
+            need_reconnect = True
+    if need_reconnect or '_engine' not in globals() or _engine is None:  
+        with open(filename) as f:
+            ora_cnn = f.read()
+        _engine = create_engine(ora_cnn, echo=False, encoding='utf-8')
+    return _engine
+
+
+def to_sql(df, name, con = None, chunksize=10000, if_exists='replace', **kwargs):
+    """
+    Writes pandas.DataFrame to database.
+
+    See params of pandas.DataFrame.to_sql. This function generate proper column names (they should less than
+    30 characters). And fixes performance issues by using varchar instead of BLOB used by default.
+    """
+    if con is None:
+        con = get_engine()
+    index_cols = [c[:30].lower() for c in (df.index.names if type(df.index) == pd.MultiIndex else [df.index.name]
+                  if df.index.name is not None else [])]
+    
+    if sys.version_info[0] < 3:
+        columns=[unicode(c[:30].lower()) for c in df.columns]
+    else:
+        columns=[c[:30].lower() for c in df.columns]
+
+    if len(set(index_cols+columns)) != len(index_cols+columns):
+        raise ValueError('Index/column names are not unique after truncation to 30 characters and converting to '
+                         'lowercase')
+
+    df_copy = df.rename(columns=dict(zip(df.columns, columns)))
+    if len(index_cols) == 1:
+        df_copy.index.rename(index_cols[0], inplace=True)
+    elif len(index_cols) > 1:
+        df_copy.index.rename(index_cols, inplace=True)
+
+    dtyp = dict([(i,types.VARCHAR(i.str.len().max())) for i in
+                 ([ii.name for ii in df_copy.index.levels] if type(df_copy.index) == pd.MultiIndex
+                  else [df_copy.index] if df_copy.index.name is not None else []) if i.dtype == 'object' or
+                  i.dtype.name=='category'] +
+                  [(c,types.VARCHAR(df_copy[c].str.len().max())) for c in df_copy.columns
+                   if df_copy[c].dtype == 'object' or df_copy[c].dtype.name == 'category'])
+    df_copy[columns].to_sql(name, con=con, chunksize=chunksize, if_exists=if_exists, dtype=dtyp, **kwargs)
+
+
+def read_sql(sql, con = None, refresh=True, optimize_types=False, str2cat=True, **kwargs):
+    """
+    Caching data read from database to csv (use refresh=True to refresh case)
+    Optimizing data types (optimize_types=True)
+
+    :param sql: SQL query
+    :param con: existing SQLAlchemy connection, will be creaye via get_engine if None passed
+    :param refresh: should cache refreshed from re-reading from database
+    :param optimize_types: should type optimization applied
+    :param str2cat: convert string columns to pandas.category
+
+    :return: pandas.DataFrame
+
+    """
+    if con is None:
+        con = get_engine()
+    dir = 'db_cache'
+    if not os.path.exists(dir):
+        os.makedirs(dir)
+    if sys.version_info[0] < 3:
+        hash_filename= sha512(sql).hexdigest()
+    else:
+        hash_filename= sha512(sql.encode('utf8')).hexdigest()    
+
+    path=os.path.join(dir, hash_filename)
+    if os.path.exists(path) and not refresh:
+        df = pd.read_pickle(path)
+        return df
+        
+    df = pd.read_sql_query(sql, con=con, **kwargs)
+    if optimize_types:
+        # types optimization works only for first reading from database or for regresh=True !!!
+        new_types = get_optimized_types(df, str2cat=str2cat)
+        for x in new_types.items():
+            df[x[0]] = df[x[0]].astype(x[1])
+
+    df.to_pickle(path)
+    return df
+
+
+def read_csv(filepath_or_buffer, optimize_types=False, sample_nrows=None, str2cat=True, minimalfloat='float64', **kwargs):
+    """
+    Reading CSV with types optimization.
+
+    :param filepath_or_buffer: file path ot file object
+    :param optimize_types: do types optimization
+    :param sample_nrows: number of rows to use for type optimization, all if None
+    :param str2cat: do conversion of str to pandas.Category
+    :param minimalfloat: minimal bit size of float 
+
+    :return: pandas.DataFrame
+    """
+    if not optimize_types:
+        return pd.read_csv(filepath_or_buffer, **kwargs)
+
+    df = pd.read_csv(filepath_or_buffer, nrows=sample_nrows, **kwargs)
+    new_types = get_optimized_types(df, str2cat=str2cat, minimalfloat=minimalfloat)
+
+    if sample_nrows is not None: # subsample based types inference - takes less memory
+        df = pd.read_csv(filepath_or_buffer, dtype=new_types, **kwargs)
+    else: # types optimization AFTER reading entire DataFrame
+        for x in new_types.items():
+            df[x[0]] = df[x[0]].astype(x[1])
+    return df
+
+
+def get_optimized_types(df, str2cat=True, minimalfloat='float64'):
+    """
+    Detects "minimum" types of DataFrame columns.
+
+    :param df: DataFrame
+    :param str2cat: should str be converted to pandas.Category
+    :param minimalfloat: minimal bit size of float 
+
+
+    :return: dict of column name -> type
+    """
+    new_types = {}
+    for x in df.dtypes.iteritems():
+        if x[1].name.startswith('int') or x[1].name.startswith('uint'):
+            flag = False
+            for t in ['uint8', 'int8', 'uint16', 'int16', 'uint32', 'int32', 'uint64', 'int64']:
+                if df[x[0]].min() >= np.iinfo(t).min and df[x[0]].max() <= np.iinfo(t).max:
+                    new_types[x[0]] = t
+                    flag = True
+                    break
+            if not flag:
+                raise ValueError()
+        elif x[1].name.startswith('float'):
+            new_t = x[1]
+            # restric possible float sizes, using float64 will result in empty list
+            # and no attempts for smaller floats will occur
+            possible_floats = [f for f in ['float32', 'float16'] if int(f[-2:]) >= int(minimalfloat[-2:])]
+            for t in possible_floats:
+                unique_num = df[x[0]].unique().shape[0]
+                if df[x[0]].astype(t).unique().shape[0] < unique_num:
+                    break
+                new_t = t
+            new_types[x[0]] = new_t
+        elif str2cat and x[1] == 'O' and df[x[0]].apply(lambda x: type(x) == str or isinstance(x, numbers.Number) and
+                                                        np.isnan(x) or x is None).all():
+            new_types[x[0]] = 'category'
+    return new_types
+
+
+
+def get_optimal_numerical_type(series, float_type='float32'):
+    """
+    Returns optimal numerical type for pd.Series.
+
+    Integer types will be chosen based on min/max values. Unsigned version if Series contains no negative numbers.
+    Float32 is default unless converting to it would lower number of unique values in the Series. In that case float64 will be used.
+
+    :param series: Pandas series
+    :param float_type: can be used to force float64 
+
+    :return: optimal dtype as string
+
+    :raises: ValueError when series is no numerical
+    """
+    if pd.api.types.is_numeric_dtype(series.values.dtype):
+        pd_type = pd.to_numeric(series).dtype.name
+    else:
+        raise ValueError('Series \'{0}\':[{1}] is not numerical.'.format(series.name, series.dtype))
+
+    if 'int' in pd_type:
+        if series.min() >= 0:
+            for t in ['uint8', 'uint16', 'uint32', 'uint64']:
+                if series.max() < np.iinfo(t).max:
+                    break
+        else:
+            for t in ['int8', 'int16', 'int32', 'int64']:
+                if series.max() < np.iinfo(t).max and series.min() > np.iinfo(t).min:
+                    break
+    else:
+        if series.astype(np.float32).nunique() == series.nunique() and float_type=='float32':
+            t = 'float32'
+        else:
+            t = 'float64'
+    return t
+
+
+# Function that will mainly do the actual cleansing parsing of the data
+def cleanse_and_parse_func(data, list_toparse):
+    
+    for col in list_toparse:
+        data = data.withColumn(col, regexp_replace(col,"\[",""))
+        data = data.withColumn(col, regexp_replace(col,"\]",""))
+        data = data.withColumn(col, regexp_replace(col,'"',"")) #Replace double quotes
+        
+        
+    list_df = []
+    
+    for col in list_toparse:
+        temp_df = data.withColumn(col, explode(split(data[col],",")))
+        temp_df = temp_df.withColumn("id", monotonically_increasing_id())
+        list_df.append(temp_df)
+        
+    
+    schema = StructType([StructField('id', StringType(), True)\
+                    , StructField('id_batch', IntegerType(), True)\
+                    , StructField('dtime_datascore', TimestampType(), True)\
+                    , StructField('part_date', IntegerType(), True)])
+
+    df = spark.createDataFrame(sc.emptyRDD(), schema)
+    
+    
+    for df_temp in list_df:
+        df = df.union(df_temp.select('id', 'id_batch', 'dtime_datascore', 'part_date'))
+        
+    df = df.select('id', 'id_batch', 'dtime_datascore', 'part_date').distinct()
+    
+    
+    list_df_new = []
+    
+    for df_temp, col in zip(list_df, list_toparse):
+        df_temp = df_temp.select(col, 'id')
+        list_df_new.append(df_temp)
+    
+        
+    for df_temp in list_df_new:
+        df = df.join(df_temp, on = 'id', how = 'left')
+        
+    
+    df = df.select(list_toparse + ['id_batch', 'dtime_datascore', 'part_date'])
+    
+    return df
+
+
+
+# Importing the functions that will be used in parsing the different categories of datascore
+
+def parse_datascoreBatches(whole_data_hive):
+    
+    
+    start_time = time.time()
+    print('Currently parsing datascoreBatches...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+     
+    datascoreBatches = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+            from test_bigdata_data_hive_temp
+        '''
+        )
+    
+    datascoreBatches.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_BATCHES')
+    
+    print('Execution time for datascoreBatches:', time.time() - start_time)
+    print('')
+
+
+def parse_applicationInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing applicationInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    applicationInfoList_df = spark.sql(
+    '''
+        select
+               id_batch
+              ,dtime_datascore
+              ,part_date
+              ,get_json_object(content, "$.applicationInfoList[*].packageName") as packageName
+              ,get_json_object(content, "$.applicationInfoList[*].firstInstallTime") as firstInstallTime
+              ,get_json_object(content, "$.applicationInfoList[*].lastUpdateTime") as lastUpdateTime
+              ,get_json_object(content, "$.applicationInfoList[*].versionName") as versionName
+              ,get_json_object(content, "$.applicationInfoList[*].versionCode") as versionCode
+              ,get_json_object(content, "$.applicationInfoList[*].flags") as flags
+              ,get_json_object(content, "$.applicationInfoList[*].baseRevisionCode") as baseRevisionCode
+              ,get_json_object(content, "$.applicationInfoList[*].installLocation") as installLocation
+              ,get_json_object(content, "$.applicationInfoList[*].sharedUserId") as sharedUserId
+              ,get_json_object(content, "$.applicationInfoList[*].splitNames") as splitNames
+              ,get_json_object(content, "$.applicationInfoList[*].splitRevisionCodes") as splitRevisionCodes
+        from test_bigdata_data_hive_temp
+    '''
+    )
+
+    col_toparse = ['packageName', 'firstInstallTime', 'lastUpdateTime', 'versionName', 'versionCode', 'flags', 'baseRevisionCode', 'installLocation'
+                    , 'sharedUserId', 'splitNames', 'splitRevisionCodes']
+                    
+    applicationInfoList_df = cleanse_and_parse_func(applicationInfoList_df, col_toparse)
+                                                            
+
+    # Saving the resulting dataframe to hive table
+    applicationInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_APPL_INFO')
+    
+    print('Execution time for applicationInfoList:', time.time() - start_time)
+    print('')
+    
+
+def parse_externalImageInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing externalImageInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    externalImageInfoList_df = spark.sql(
+    '''
+        select
+               id_batch
+              ,dtime_datascore
+              ,part_date
+              ,get_json_object(content, '$.externalImageInfoList[*].dateAdded') as dateAdded
+              ,get_json_object(content, '$.externalImageInfoList[*].dateModified') as dateModified
+              ,get_json_object(content, '$.externalImageInfoList[*].dateTaken') as dateTaken
+              ,get_json_object(content, '$.externalImageInfoList[*].height') as height
+              ,get_json_object(content, '$.externalImageInfoList[*].mimeType') as mimeType
+              ,get_json_object(content, '$.externalImageInfoList[*].orientation') as orientation
+              ,get_json_object(content, '$.externalImageInfoList[*].size') as size
+              ,get_json_object(content, '$.externalImageInfoList[*].width') as width
+        from test_bigdata_data_hive_temp
+    '''
+    
+    )
+    
+    col_toparse = ['dateAdded', 'dateModified', 'dateTaken', 'height', 'mimeType', 'orientation', 'size', 'width']
+
+    externalImageInfoList_df = cleanse_and_parse_func(externalImageInfoList_df, col_toparse)
+
+    externalImageInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_EXT_IMG_INFO')
+    
+    print('Execution time for externalImageInfoList:', time.time() - start_time)
+    print('')
+
+
+def parse_smsInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing smsInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    smsInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.smsInfoList[*].creator') as creator
+                  ,get_json_object(content, '$.smsInfoList[*].date') as date
+                  ,get_json_object(content, '$.smsInfoList[*].dateSent') as dateSent
+                  ,get_json_object(content, '$.smsInfoList[*].errorCode') as errorCode
+                  ,get_json_object(content, '$.smsInfoList[*].hasSubject') as hasSubject
+                  ,get_json_object(content, '$.smsInfoList[*].protocol') as protocol
+                  ,get_json_object(content, '$.smsInfoList[*].read') as read
+                  ,get_json_object(content, '$.smsInfoList[*].seen') as seen
+                  ,get_json_object(content, '$.smsInfoList[*].serviceCenter') as serviceCenter
+                  ,get_json_object(content, '$.smsInfoList[*].status') as status
+                  ,get_json_object(content, '$.smsInfoList[*].subscriptionID') as subscriptionID
+                  ,get_json_object(content, '$.smsInfoList[*].threadID') as threadID
+                  ,get_json_object(content, '$.smsInfoList[*].type') as type
+                  ,get_json_object(content, '$.smsInfoList[*].contactId') as contactId
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['creator', 'date', 'dateSent', 'errorCode', 'hasSubject', 'protocol', 'read', 'seen', 'serviceCenter'
+                    , 'status', 'subscriptionID', 'threadID', 'type', 'contactId']
+                    
+    smsInfoList_df = cleanse_and_parse_func(smsInfoList_df, col_toparse)
+    
+    smsInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_SMS_INFO')
+    
+    print('Execution time for smsInfoList:', time.time() - start_time)
+    print('')
+    
+
+def parse_downloadDataInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing downloadDataInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    downloadDataInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.downloadDataInfoList[*].lastModified') as lastModified
+                  ,get_json_object(content, '$.downloadDataInfoList[*].length') as length
+                  ,get_json_object(content, '$.downloadDataInfoList[*].type') as type
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['lastModified', 'length', 'type']
+    
+    downloadDataInfoList_df = cleanse_and_parse_func(downloadDataInfoList_df, col_toparse)
+    
+    downloadDataInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_DOWNLOAD_INFO')
+    
+    print('Execution time for downloadDataInfoList:', time.time() - start_time)
+    print('')
+    
+    
+def parse_externalAudioInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing externalAudioInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    externalAudioInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.externalAudioInfoList[*].dateAdded') as dateAdded
+                  ,get_json_object(content, '$.externalAudioInfoList[*].dateModified') as dateModified
+                  ,get_json_object(content, '$.externalAudioInfoList[*].duration') as duration
+                  ,get_json_object(content, '$.externalAudioInfoList[*].mimeType') as mimeType
+                  ,get_json_object(content, '$.externalAudioInfoList[*].music') as music
+                  ,get_json_object(content, '$.externalAudioInfoList[*].year') as year
+                  ,get_json_object(content, '$.externalAudioInfoList[*].isNotification') as isNotification
+                  ,get_json_object(content, '$.externalAudioInfoList[*].isRingtone') as isRingtone
+                  ,get_json_object(content, '$.externalAudioInfoList[*].isAlarm') as isAlarm
+                  ,get_json_object(content, '$.externalAudioInfoList[*].album') as album
+                  ,get_json_object(content, '$.externalAudioInfoList[*].albumID') as albumID
+                  ,get_json_object(content, '$.externalAudioInfoList[*].albumKey') as albumKey
+                  ,get_json_object(content, '$.externalAudioInfoList[*].artist') as artist
+                  ,get_json_object(content, '$.externalAudioInfoList[*].artistID') as artistID
+                  ,get_json_object(content, '$.externalAudioInfoList[*].artistKey') as artistKey
+                  ,get_json_object(content, '$.externalAudioInfoList[*].bookmark') as bookmark
+                  ,get_json_object(content, '$.externalAudioInfoList[*].composer') as composer
+                  ,get_json_object(content, '$.externalAudioInfoList[*].isPodcast') as isPodcast
+                  ,get_json_object(content, '$.externalAudioInfoList[*].titleKey') as titleKey
+                  ,get_json_object(content, '$.externalAudioInfoList[*].track') as track
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['dateAdded', 'dateModified', 'duration', 'mimeType', 'music', 'year', 'isNotification', 'isRingtone', 'isAlarm', 'album', 'albumID'
+                    , 'albumKey', 'artist', 'artistID', 'artistKey', 'bookmark', 'composer', 'isPodcast', 'titleKey', 'track']
+                    
+    externalAudioInfoList_df = cleanse_and_parse_func(externalAudioInfoList_df, col_toparse)
+    
+    externalAudioInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_EXT_AUD_INFO')
+    
+    print('Execution time for externalAudioInfoList:', time.time() - start_time)
+    print('')
+    
+
+def parse_accountInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing accountInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    accountInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.accountInfoList[*].accountType') as accountType
+            from test_bigdata_data_hive_temp
+        '''
+        )
+    
+    col_toparse = ['accountType']
+    
+    accountInfoList_df = cleanse_and_parse_func(accountInfoList_df, col_toparse)
+    
+    accountInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_ACCT_INFO')
+    
+    print('Execution time for accountInfoList:', time.time() - start_time)
+    print('')
+    
+
+def parse_bluetoothInfo(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing bluetoothInfo...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    bluetoothInfo_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.bluetoothInfo[*].address') as address
+                  ,get_json_object(content, '$.bluetoothInfo[*].bondState') as bondState
+                  ,get_json_object(content, '$.bluetoothInfo[*].deviceClass') as deviceClass
+                  ,get_json_object(content, '$.bluetoothInfo[*].majorDeviceClass') as majorDeviceClass
+                  ,get_json_object(content, '$.bluetoothInfo[*].name') as name
+                  ,get_json_object(content, '$.bluetoothInfo[*].type') as type
+                  ,get_json_object(content, '$.bluetoothInfo[*].UUIDS') as UUIDS
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['address', 'bondState', 'deviceClass', 'majorDeviceClass', 'name', 'type', 'UUIDS']
+    
+    bluetoothInfo_df = cleanse_and_parse_func(bluetoothInfo_df, col_toparse)
+    
+    bluetoothInfo_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_BLUETOOTH_INFO')
+    
+    print('Execution time for bluetoothInfo:', time.time() - start_time)
+    print('')
+    
+
+def parse_calendarEventsInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing calendarEventsInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    calendarEventsInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.calendarEventsInfoList[*].guestsCanInviteOthers') as guestsCanInviteOthers
+                  ,get_json_object(content, '$.calendarEventsInfoList[*].guestsCanModify') as guestsCanModify
+                  ,get_json_object(content, '$.calendarEventsInfoList[*].guestsCanSeeGuests') as guestsCanSeeGuests
+                  ,get_json_object(content, '$.calendarEventsInfoList[*].hasAlarm') as hasAlarm
+                  ,get_json_object(content, '$.calendarEventsInfoList[*].hasAttendeeData') as hasAttendeeData
+                  ,get_json_object(content, '$.calendarEventsInfoList[*].hasExtendedProperties') as hasExtendedProperties
+                  ,get_json_object(content, '$.calendarEventsInfoList[*].isOrganizer') as isOrganizer
+                  ,get_json_object(content, '$.calendarEventsInfoList[*].lastDate') as lastDate
+                  ,get_json_object(content, '$.calendarEventsInfoList[*].rrule') as rrule
+                  ,get_json_object(content, '$.calendarEventsInfoList[*].status') as status
+                  ,get_json_object(content, '$.calendarEventsInfoList[*].rdate') as rdate
+            from test_bigdata_data_hive_temp
+        '''
+        )
+    
+    col_toparse = ['guestsCanInviteOthers', 'guestsCanModify', 'guestsCanSeeGuests', 'hasAlarm', 'hasAttendeeData', 'hasExtendedProperties'
+                    , 'isOrganizer', 'lastDate', 'rrule', 'status', 'rdate']
+                    
+    calendarEventsInfoList_df = cleanse_and_parse_func(calendarEventsInfoList_df, col_toparse)
+    
+    calendarEventsInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_CALENDAR_EVENTS_INFO')
+    
+    print('Execution time for calendarEventsInfoList:', time.time() - start_time)
+    print('')
+    
+    
+def parse_calendarInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing calendarInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    calendarInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.calendarInfoList[*].accountType') as accountType
+                  ,get_json_object(content, '$.calendarInfoList[*].allowedAttendeeTypes') as allowedAttendeeTypes
+                  ,get_json_object(content, '$.calendarInfoList[*].allowedAvailability') as allowedAvailability
+                  ,get_json_object(content, '$.calendarInfoList[*].allowedReminders') as allowedReminders
+                  ,get_json_object(content, '$.calendarInfoList[*].calendarAccessLevel') as calendarAccessLevel
+                  ,get_json_object(content, '$.calendarInfoList[*].calendarTimeZone') as calendarTimeZone
+                  ,get_json_object(content, '$.calendarInfoList[*].id') as id
+                  ,get_json_object(content, '$.calendarInfoList[*].syncEvents') as syncEvents
+                  ,get_json_object(content, '$.calendarInfoList[*].visible') as visible
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['accountType', 'allowedAttendeeTypes', 'allowedAvailability', 'allowedReminders', 'calendarAccessLevel'
+                    , 'calendarTimeZone', 'id', 'syncEvents', 'visible']
+                    
+    calendarInfoList_df = cleanse_and_parse_func(calendarInfoList_df, col_toparse)
+    
+    calendarInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_CALENDAR_INFO')
+    
+    print('Execution time for calendarInfoList:', time.time() - start_time)
+    print('')
+    
+    
+def parse_calendarRemindersInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing calendarRemindersInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    calendarRemindersInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.calendarRemindersInfoList[*].eventId') as eventId
+                  ,get_json_object(content, '$.calendarRemindersInfoList[*].method') as method
+                  ,get_json_object(content, '$.calendarRemindersInfoList[*].minutes') as minutes
+            from test_bigdata_data_hive_temp
+        '''
+        )
+    
+    col_toparse = ['eventId', 'method', 'minutes']
+    
+    calendarRemindersInfoList_df = cleanse_and_parse_func(calendarRemindersInfoList_df, col_toparse)
+    
+    calendarRemindersInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_CALENDAR_REMINDER_INFO')
+    
+    print('Execution time for calendarRemindersInfoList:', time.time() - start_time)
+    print('')
+    
+    
+def parse_calendarAttendeeInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing calendarAttendeeInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    calendarAttendeeInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.calendarAttendeeInfoList[*].eventId') as eventId
+                  ,get_json_object(content, '$.calendarAttendeeInfoList[*].attendeeType') as attendeeType
+                  ,get_json_object(content, '$.calendarAttendeeInfoList[*].attendeeStatus') as attendeeStatus
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['eventId', 'attendeeType', 'attendeeStatus']
+    
+    calendarAttendeeInfoList_df = cleanse_and_parse_func(calendarAttendeeInfoList_df, col_toparse)
+    
+    calendarAttendeeInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_CALENDAR_ATTENDEE_INFO')
+    
+    print('Execution time for calendarAttendeeInfoList:', time.time() - start_time)
+    print('')
+
+def parse_contactInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing contactInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    contactInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.contactInfoList[*].contactLastUpdatedTimestamp') as contactLastUpdatedTimestamp
+                  ,get_json_object(content, '$.contactInfoList[*].hasContactStatus') as hasContactStatus
+                  ,get_json_object(content, '$.contactInfoList[*].hasPhoneNumber') as hasPhoneNumber
+                  ,get_json_object(content, '$.contactInfoList[*].hasPhotoId') as hasPhotoId
+                  ,get_json_object(content, '$.contactInfoList[*].id') as id
+                  ,get_json_object(content, '$.contactInfoList[*].inDefaultDirectory') as inDefaultDirectory
+                  ,get_json_object(content, '$.contactInfoList[*].inVisibleGroup') as inVisibleGroup
+                  ,get_json_object(content, '$.contactInfoList[*].isCustomRingtone') as isCustomRingtone
+                  ,get_json_object(content, '$.contactInfoList[*].isUserProfile') as isUserProfile
+                  ,get_json_object(content, '$.contactInfoList[*].lastTimeContacted') as lastTimeContacted
+                  ,get_json_object(content, '$.contactInfoList[*].photoFileID') as photoFileID
+                  ,get_json_object(content, '$.contactInfoList[*].sendToVoicemail') as sendToVoicemail
+                  ,get_json_object(content, '$.contactInfoList[*].starred') as starred
+                  ,get_json_object(content, '$.contactInfoList[*].timesContacted') as timesContacted
+                  ,get_json_object(content, '$.contactInfoList[*].contactStatusTimestamp') as contactStatusTimestamp
+            from test_bigdata_data_hive_temp
+        '''
+        )
+    
+    col_toparse = ['contactLastUpdatedTimestamp', 'hasContactStatus', 'hasPhoneNumber', 'hasPhotoId', 'id', 'inDefaultDirectory', 'inVisibleGroup', 'isCustomRingtone'
+                    , 'isUserProfile', 'lastTimeContacted', 'photoFileID', 'sendToVoicemail', 'starred', 'timesContacted', 'contactStatusTimestamp']
+                    
+    contactInfoList_df = cleanse_and_parse_func(contactInfoList_df, col_toparse)
+    
+    contactInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_CONTACT_INFO')
+    
+    print('Execution time for contactInfoList:', time.time() - start_time)
+    print('')
+
+
+def parse_errors(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing errors...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    errors_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.errors[*].error') as error
+                  ,get_json_object(content, '$.errors[*].fieldName') as fieldName
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['error', 'fieldName']
+    
+    errors_df = cleanse_and_parse_func(errors_df, col_toparse)
+    
+    errors_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_ERRORS')
+    
+    print('Execution time for errors:', time.time() - start_time)
+    print('')
+    
+    
+def parse_fileInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing fileInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    fileInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.fileInfoList[*].location') as location
+                  ,get_json_object(content, '$.fileInfoList[*].size') as size
+                  ,get_json_object(content, '$.fileInfoList[*].type') as type
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['location', 'size', 'type']
+    
+    fileInfoList_df = cleanse_and_parse_func(fileInfoList_df, col_toparse)
+    
+    fileInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_FILE_INFO')
+    
+    print('Execution time for fileInfoList:', time.time() - start_time)
+    print('')
+    
+    
+def parse_gmailInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing gmailInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    gmailInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.gmailInfoList[*].id') as id
+                  ,get_json_object(content, '$.gmailInfoList[*].name') as name
+                  ,get_json_object(content, '$.gmailInfoList[*].numConversations') as numConversations
+                  ,get_json_object(content, '$.gmailInfoList[*].numUnreadConversations') as numUnreadConversations
+            from daa_hive_temp
+        '''
+        )
+    
+    col_toparse = ['id', 'name', 'numConversations', 'numUnreadConversations']
+    
+    gmailInfoList_df = cleanse_and_parse_func(gmailInfoList_df, col_toparse)
+    
+    gmailInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_GMAIL_INFO')
+    
+    print('Execution time for gmailInfoList:', time.time() - start_time)
+    print('')
+    
+    
+def parse_internalAudioInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing internalAudioInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    internalAudioInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.internalAudioInfoList[*].album') as album
+                  ,get_json_object(content, '$.internalAudioInfoList[*].albumID') as albumID
+                  ,get_json_object(content, '$.internalAudioInfoList[*].albumKey') as albumKey
+                  ,get_json_object(content, '$.internalAudioInfoList[*].artist') as artist
+                  ,get_json_object(content, '$.internalAudioInfoList[*].artistID') as artistID
+                  ,get_json_object(content, '$.internalAudioInfoList[*].artistKey') as artistKey
+                  ,get_json_object(content, '$.internalAudioInfoList[*].dateAdded') as dateAdded
+                  ,get_json_object(content, '$.internalAudioInfoList[*].dateModified') as dateModified
+                  ,get_json_object(content, '$.internalAudioInfoList[*].duration') as duration
+                  ,get_json_object(content, '$.internalAudioInfoList[*].isAlarm') as isAlarm
+                  ,get_json_object(content, '$.internalAudioInfoList[*].isNotification') as isNotification
+                  ,get_json_object(content, '$.internalAudioInfoList[*].isPodcast') as isPodcast
+                  ,get_json_object(content, '$.internalAudioInfoList[*].isRingtone') as isRingtone
+                  ,get_json_object(content, '$.internalAudioInfoList[*].mimeType') as mimeType
+                  ,get_json_object(content, '$.internalAudioInfoList[*].music') as music
+                  ,get_json_object(content, '$.internalAudioInfoList[*].titleKey') as titleKey
+                  ,get_json_object(content, '$.internalAudioInfoList[*].track') as track
+                  ,get_json_object(content, '$.internalAudioInfoList[*].year') as year
+                  ,get_json_object(content, '$.internalAudioInfoList[*].composer') as composer
+            from test_bigdata_data_hive_temp
+        '''
+        )
+    
+    col_toparse = ['album', 'albumID', 'albumKey', 'artist', 'artistID', 'artistKey', 'dateAdded', 'dateModified', 'duration', 'isAlarm', 'isNotification'
+                    , 'isPodcast', 'isRingtone', 'mimeType', 'music', 'titleKey', 'track', 'year', 'composer']
+                    
+    internalAudioInfoList_df = cleanse_and_parse_func(internalAudioInfoList_df, col_toparse)
+    
+    internalAudioInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_INT_AUD_INFO')
+    
+    print('Execution time for internalAudioInfoList:', time.time() - start_time)
+    print('')
+
+
+def parse_internalImageInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing internalImageInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    internalImageInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.internalImageInfoList[*].dateAdded') as dateAdded
+                  ,get_json_object(content, '$.internalImageInfoList[*].dateModified') as dateModified
+                  ,get_json_object(content, '$.internalImageInfoList[*].dateTaken') as dateTaken
+                  ,get_json_object(content, '$.internalImageInfoList[*].height') as height
+                  ,get_json_object(content, '$.internalImageInfoList[*].mimeType') as mimeType
+                  ,get_json_object(content, '$.internalImageInfoList[*].size') as size
+                  ,get_json_object(content, '$.internalImageInfoList[*].width') as width
+                  ,get_json_object(content, '$.internalImageInfoList[*].orientation') as orientation
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['dateAdded', 'dateModified', 'dateTaken', 'height', 'mimeType', 'size', 'width', 'orientation']
+    
+    internalImageInfoList_df = cleanse_and_parse_func(internalImageInfoList_df, col_toparse)
+    
+    internalImageInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_INT_IMG_INFO')
+    
+    print('Execution time for internalImageInfoList:', time.time() - start_time)
+    print('')
+    
+    
+def parse_internalVideoInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing internalVideoInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    internalVideoInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.internalVideoInfoList[*].dateAdded') as dateAdded
+                  ,get_json_object(content, '$.internalVideoInfoList[*].dateModified') as dateModified
+                  ,get_json_object(content, '$.internalVideoInfoList[*].dateTaken') as dateTaken
+                  ,get_json_object(content, '$.internalVideoInfoList[*].duration') as duration
+                  ,get_json_object(content, '$.internalVideoInfoList[*].hasTags') as hasTags
+                  ,get_json_object(content, '$.internalVideoInfoList[*].iPrivate') as iPrivate
+                  ,get_json_object(content, '$.internalVideoInfoList[*].mimeType') as mimeType
+                  ,get_json_object(content, '$.internalVideoInfoList[*].resolution') as resolution
+                  ,get_json_object(content, '$.internalVideoInfoList[*].size') as size
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['dateAdded', 'dateModified', 'dateTaken', 'duration', 'hasTags', 'iPrivate', 'mimeType', 'resolution', 'size']
+    
+    internalVideoInfoList_df = cleanse_and_parse_func(internalVideoInfoList_df, col_toparse)
+    
+    internalVideoInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_INT_VID_INFO')
+    
+    print('Execution time for internalVideoInfoList:', time.time() - start_time)
+    print('')
+    
+
+def parse_sensorInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing sensorInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    sensorInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.sensorInfoList[*].additionalInfoSupported') as additionalInfoSupported
+                  ,get_json_object(content, '$.sensorInfoList[*].dynamicSensor') as dynamicSensor
+                  ,get_json_object(content, '$.sensorInfoList[*].fifoMaxEventCount') as fifoMaxEventCount
+                  ,get_json_object(content, '$.sensorInfoList[*].fifoReservedEventCount') as fifoReservedEventCount
+                  ,get_json_object(content, '$.sensorInfoList[*].highestDirectReportRateLevel') as highestDirectReportRateLevel
+                  ,get_json_object(content, '$.sensorInfoList[*].id') as id
+                  ,get_json_object(content, '$.sensorInfoList[*].isWakeUpSensor') as isWakeUpSensor
+                  ,get_json_object(content, '$.sensorInfoList[*].maxDelay') as maxDelay
+                  ,get_json_object(content, '$.sensorInfoList[*].maximumRange') as maximumRange
+                  ,get_json_object(content, '$.sensorInfoList[*].minDelay') as minDelay
+                  ,get_json_object(content, '$.sensorInfoList[*].name') as name
+                  ,get_json_object(content, '$.sensorInfoList[*].power') as power
+                  ,get_json_object(content, '$.sensorInfoList[*].reportingMode') as reportingMode
+                  ,get_json_object(content, '$.sensorInfoList[*].resolution') as resolution
+                  ,get_json_object(content, '$.sensorInfoList[*].stringType') as stringType
+                  ,get_json_object(content, '$.sensorInfoList[*].type') as type
+                  ,get_json_object(content, '$.sensorInfoList[*].vendor') as vendor
+                  ,get_json_object(content, '$.sensorInfoList[*].version') as version
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['additionalInfoSupported', 'dynamicSensor', 'fifoMaxEventCount', 'fifoReservedEventCount', 'highestDirectReportRateLevel', 'id', 'isWakeUpSensor'
+                    , 'maxDelay', 'maximumRange', 'minDelay', 'name', 'power', 'reportingMode', 'resolution', 'stringType', 'type', 'vendor', 'version']
+                    
+    sensorInfoList_df = cleanse_and_parse_func(sensorInfoList_df, col_toparse)
+    
+    sensorInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_SENSOR_INFO')
+    
+    print('Execution time for sensorInfoList:', time.time() - start_time)
+    print('')
+    
+
+def parse_externalVideoInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing externalVideoInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    externalVideoInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.externalVideoInfoList[*].dateAdded') as dateAdded
+                  ,get_json_object(content, '$.externalVideoInfoList[*].dateModified') as dateModified
+                  ,get_json_object(content, '$.externalVideoInfoList[*].dateTaken') as dateTaken
+                  ,get_json_object(content, '$.externalVideoInfoList[*].duration') as duration
+                  ,get_json_object(content, '$.externalVideoInfoList[*].hasTags') as hasTags
+                  ,get_json_object(content, '$.externalVideoInfoList[*].iPrivate') as iPrivate
+                  ,get_json_object(content, '$.externalVideoInfoList[*].mimeType') as mimeType
+                  ,get_json_object(content, '$.externalVideoInfoList[*].resolution') as resolution
+                  ,get_json_object(content, '$.externalVideoInfoList[*].size') as size
+            from test_bigdata_data_hive_temp
+        '''
+        )
+    
+    col_toparse = ['dateAdded', 'dateModified', 'dateTaken', 'duration', 'hasTags', 'iPrivate', 'mimeType', 'resolution', 'size']
+    
+    externalVideoInfoList_df = cleanse_and_parse_func(externalVideoInfoList_df, col_toparse)
+    
+    externalVideoInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_EXT_VID_INFO')
+    
+    print('Execution time for externalVideoInfoList:', time.time() - start_time)
+    print('')
+    
+
+def parse_contactGroupInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing contactGroupInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    contactGroupInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.contactGroupInfoList[*].accountType') as accountType
+                  ,get_json_object(content, '$.contactGroupInfoList[*].autoAdd') as autoAdd
+                  ,get_json_object(content, '$.contactGroupInfoList[*].deleted') as deleted
+                  ,get_json_object(content, '$.contactGroupInfoList[*].favorites') as favorites
+                  ,get_json_object(content, '$.contactGroupInfoList[*].groupIsReadOnly') as groupIsReadOnly
+                  ,get_json_object(content, '$.contactGroupInfoList[*].groupVisible') as groupVisible
+                  ,get_json_object(content, '$.contactGroupInfoList[*].hasNotes') as hasNotes
+                  ,get_json_object(content, '$.contactGroupInfoList[*].id') as id
+                  ,get_json_object(content, '$.contactGroupInfoList[*].shouldSync') as shouldSync
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['accountType', 'autoAdd', 'deleted', 'favorites', 'groupIsReadOnly', 'groupVisible', 'hasNotes', 'id', 'shouldSync']    
+    
+    contactGroupInfoList_df = cleanse_and_parse_func(contactGroupInfoList_df, col_toparse)
+    
+    contactGroupInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_CONTACT_GROUP_INFO')
+    
+    print('Execution time for contactGroupInfoList:', time.time() - start_time)
+    print('')
+    
+
+def parse_batteryInfo(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing batteryInfo...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    batteryInfo_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.batteryInfo.batteryPct') as batteryPct
+                  ,get_json_object(content, '$.batteryInfo.chargePlug') as chargePlug
+                  ,get_json_object(content, '$.batteryInfo.health') as health
+                  ,get_json_object(content, '$.batteryInfo.iconSmall') as iconSmall
+                  ,get_json_object(content, '$.batteryInfo.isCharging') as isCharging
+                  ,get_json_object(content, '$.batteryInfo.level') as level
+                  ,get_json_object(content, '$.batteryInfo.present') as present
+                  ,get_json_object(content, '$.batteryInfo.scale') as scale
+                  ,get_json_object(content, '$.batteryInfo.status') as status
+                  ,get_json_object(content, '$.batteryInfo.technology') as technology
+                  ,get_json_object(content, '$.batteryInfo.temperatur') as temperatur
+                  ,get_json_object(content, '$.batteryInfo.voltage') as voltage
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['batteryPct', 'chargePlug', 'health', 'iconSmall', 'isCharging', 'level', 'present', 'scale', 'status', 'technology', 'temperatur', 'voltage']
+    
+    batteryInfo_df = batteryInfo_df.select(col_toparse + ['id_batch', 'dtime_datascore', 'part_date'])
+        
+    batteryInfo_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_BATTERY_INFO')
+    
+    print('Execution time for batteryInfo:', time.time() - start_time)
+    print('')
+    
+    
+def parse_generalInfo(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing generalInfo...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    generalInfo_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.generalInfo.androidId') as androidId
+                  ,get_json_object(content, '$.generalInfo.imei') as imei
+                  ,get_json_object(content, '$.generalInfo.keyboard') as keyboard
+                  ,get_json_object(content, '$.generalInfo.localeDisplayLanguage') as localeDisplayLanguage
+                  ,get_json_object(content, '$.generalInfo.mcc') as mcc
+                  ,get_json_object(content, '$.generalInfo.meid') as meid
+                  ,get_json_object(content, '$.generalInfo.mnc') as mnc
+                  ,get_json_object(content, '$.generalInfo.networkOperator') as networkOperator
+                  ,get_json_object(content, '$.generalInfo.networkOperatorName') as networkOperatorName
+                  ,get_json_object(content, '$.generalInfo.phoneNumber') as phoneNumber
+                  ,get_json_object(content, '$.generalInfo.phoneType') as phoneType
+                  ,get_json_object(content, '$.generalInfo.simCountryIso') as simCountryIso
+                  ,get_json_object(content, '$.generalInfo.simSerialNumber') as simSerialNumber
+                  ,get_json_object(content, '$.generalInfo.timeZoneId') as timeZoneId
+                  ,get_json_object(content, '$.generalInfo.deviceId') as deviceId
+                  ,get_json_object(content, '$.generalInfo.localeIso3Country') as localeIso3Country
+                  ,get_json_object(content, '$.generalInfo.localeIso3Language') as localeIso3Language
+            from test_bigdata_data_hive_temp
+        '''
+        )
+    
+    col_toparse = ['androidId', 'imei', 'keyboard', 'localeDisplayLanguage', 'mcc', 'meid', 'mnc', 'networkOperator', 'networkOperatorName'
+                    , 'phoneNumber', 'phoneType', 'simCountryIso', 'simSerialNumber', 'timeZoneId', 'deviceId', 'localeIso3Country', 'localeIso3Language']
+                    
+    
+    for col in col_toparse:
+        generalInfo_df = generalInfo_df.withColumn(col, regexp_replace(col,'"',""))
+        
+    generalInfo_df = generalInfo_df.select(col_toparse + ['id_batch', 'dtime_datascore', 'part_date'])
+    
+    generalInfo_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_GENERAL_INFO')
+    
+    print('Execution time for generalInfo:', time.time() - start_time)
+    print('')
+
+
+def parse_libraryInfo(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing libraryInfo...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    libraryInfo_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.libraryInfo.endCollectTime') as endCollectTime
+                  ,get_json_object(content, '$.libraryInfo.libraryVersion') as libraryVersion
+                  ,get_json_object(content, '$.libraryInfo.startCollectTime') as startCollectTime
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['endCollectTime', 'libraryVersion', 'startCollectTime']
+    
+    for col in col_toparse:
+        libraryInfo_df = libraryInfo_df.withColumn(col, regexp_replace(col,'"',""))
+        
+    libraryInfo_df = libraryInfo_df.select(col_toparse + ['id_batch', 'dtime_datascore', 'part_date'])
+    
+    libraryInfo_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_LIBRARY_INFO')
+    
+    print('Execution time for libraryInfo:', time.time() - start_time)
+    print('')
+    
+
+def parse_wifiInfo(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing wifiInfo...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    wifiInfo_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.wifiInfo.bssid') as bssid
+                  ,get_json_object(content, '$.wifiInfo.frequency') as frequency
+                  ,get_json_object(content, '$.wifiInfo.ipAddress') as ipAddress
+                  ,get_json_object(content, '$.wifiInfo.macAddress') as macAddress
+                  ,get_json_object(content, '$.wifiInfo.wifiConfigList') as wifiConfigList
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['bssid', 'frequency', 'ipAddress', 'macAddress', 'wifiConfigList']
+    
+    for col in col_toparse:
+        wifiInfo_df = wifiInfo_df.withColumn(col, regexp_replace(col,'"',""))
+        
+    wifiInfo_df = wifiInfo_df.select(col_toparse + ['id_batch', 'dtime_datascore', 'part_date'])
+    
+    wifiInfo_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_WIFI_INFO')
+    
+    print('Execution time for wifiInfo:', time.time() - start_time)
+    print('')
+    
+
+def parse_locationInfo(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing locationInfo...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    locationInfo_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.locationInfo.address') as address
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['address']
+    
+    for col in col_toparse:
+        locationInfo_df = locationInfo_df.withColumn(col, regexp_replace(col,'"',""))
+        
+    locationInfo_df = locationInfo_df.select(col_toparse + ['id_batch', 'dtime_datascore', 'part_date'])
+    
+    locationInfo_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_LOCATION_INFO')
+    
+    print('Execution time for locationInfo:', time.time() - start_time)
+    print('')
+    
+
+def parse_hardwareInfo(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing hardwareInfo...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    hardwareInfo_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.hardwareInfo.bootloader') as bootloader
+                  ,get_json_object(content, '$.hardwareInfo.brand') as brand
+                  ,get_json_object(content, '$.hardwareInfo.display') as display
+                  ,get_json_object(content, '$.hardwareInfo.externalStorageFree') as externalStorageFree
+                  ,get_json_object(content, '$.hardwareInfo.externalStorageTotal') as externalStorageTotal
+                  ,get_json_object(content, '$.hardwareInfo.fingerprint') as fingerprint
+                  ,get_json_object(content, '$.hardwareInfo.hardware') as hardware
+                  ,get_json_object(content, '$.hardwareInfo.host') as host
+                  ,get_json_object(content, '$.hardwareInfo.id') as id
+                  ,get_json_object(content, '$.hardwareInfo.mainStorageFree') as mainStorageFree
+                  ,get_json_object(content, '$.hardwareInfo.mainStorageTotal') as mainStorageTotal
+                  ,get_json_object(content, '$.hardwareInfo.manufacturer') as manufacturer
+                  ,get_json_object(content, '$.hardwareInfo.model') as model
+                  ,get_json_object(content, '$.hardwareInfo.product') as product
+                  ,get_json_object(content, '$.hardwareInfo.ramTotalSize') as ramTotalSize
+                  ,get_json_object(content, '$.hardwareInfo.release') as release
+                  ,get_json_object(content, '$.hardwareInfo.serial') as serial
+                  ,get_json_object(content, '$.hardwareInfo.supported32BitAbis') as supported32BitAbis
+                  ,get_json_object(content, '$.hardwareInfo.supported64BitAbis') as supported64BitAbis
+                  ,get_json_object(content, '$.hardwareInfo.supportedAbis') as supportedAbis
+                  ,get_json_object(content, '$.hardwareInfo.tags') as tags
+                  ,get_json_object(content, '$.hardwareInfo.time') as time
+                  ,get_json_object(content, '$.hardwareInfo.type') as type
+                  ,get_json_object(content, '$.hardwareInfo.user') as user
+                  ,get_json_object(content, '$.hardwareInfo.cpuAbi') as cpuAbi
+                  ,get_json_object(content, '$.hardwareInfo.cpuAbi2') as cpuAbi2
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['bootloader', 'brand', 'display', 'externalStorageFree', 'externalStorageTotal', 'fingerprint', 'hardware', 'host', 'id', 'mainStorageFree'
+                    , 'mainStorageTotal', 'manufacturer', 'model', 'product', 'ramTotalSize', 'release', 'serial', 'supported32BitAbis', 'supported64BitAbis'
+                    , 'supportedAbis', 'tags', 'time', 'type', 'user', 'cpuAbi', 'cpuAbi2']
+                    
+    for col in col_toparse:
+        hardwareInfo_df = hardwareInfo_df.withColumn(col, regexp_replace(col,'"',""))
+    
+    hardwareInfo_df = hardwareInfo_df.select(col_toparse + ['id_batch', 'dtime_datascore', 'part_date'])
+    
+    hardwareInfo_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_HARDWARE_INFO')
+    
+    print('Execution time for hardwareInfo:', time.time() - start_time)
+    print('')
+    
+    
+def parse_callInfoList(whole_data_hive):
+    
+    start_time = time.time()
+    print('Currently parsing callInfoList...')
+    
+    whole_data_hive.createOrReplaceTempView('test_bigdata_data_hive_temp')
+    
+    callInfoList_df = spark.sql(
+        '''
+            select
+                   id_batch
+                  ,dtime_datascore
+                  ,part_date
+                  ,get_json_object(content, '$.callInfoList[*].cachedPhotoID') as cachedPhotoID
+                  ,get_json_object(content, '$.callInfoList[*].contactIdList') as contactIdList
+                  ,get_json_object(content, '$.callInfoList[*].countryISO') as countryISO
+                  ,get_json_object(content, '$.callInfoList[*].date') as date
+                  ,get_json_object(content, '$.callInfoList[*].duration') as duration
+                  ,get_json_object(content, '$.callInfoList[*].features') as features
+                  ,get_json_object(content, '$.callInfoList[*].isRead') as isRead
+                  ,get_json_object(content, '$.callInfoList[*].isVoiceEmailUri') as isVoiceEmailUri
+                  ,get_json_object(content, '$.callInfoList[*].lastModified') as lastModified
+                  ,get_json_object(content, '$.callInfoList[*].newCall') as newCall
+                  ,get_json_object(content, '$.callInfoList[*].type') as type
+                  ,get_json_object(content, '$.callInfoList[*].limitParamKey') as limitParamKey
+            from test_bigdata_data_hive_temp
+        '''
+        )
+        
+    col_toparse = ['cachedPhotoID', 'contactIdList', 'countryISO', 'date', 'duration', 'features', 'isRead', 'isVoiceEmailUri', 'lastModified', 'newCall'
+                    , 'type', 'limitParamKey']
+    
+    callInfoList_df = cleanse_and_parse_func(callInfoList_df, col_toparse)
+    
+    callInfoList_df.repartition(200).write.format('parquet').partitionBy('part_date').mode('append').saveAsTable('TEST_BIGDATA_OWNER.DATASCORE_CALL_INFO')
+    
+    print('Execution time for callInfoList:', time.time() - start_time)
+    print('')
+    
